@@ -5,16 +5,17 @@ import (
 	"crypto/md5"
 	"flag"
 	"fmt"
-	ini "github.com/glacjay/goini"
 	"io"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bo0rsh201/go-glob"
+	ini "github.com/glacjay/goini"
 )
 
 type (
@@ -87,20 +88,21 @@ const (
 )
 
 var (
-	sourceDir     string
-	unrealsyncDir string
-	localDiff     [MAX_DIFF_SIZE]byte
-	localDiffPtr  int
-	fschanges     = make(chan string, 10000)
-	dirschan      = make(chan string, 10000)
-	rcvchan       = make(chan bool)
-	excludes      = map[string]bool{}
-	servers       = map[string]Settings{}
-	isServer      = false
-	isDebug       = false
-	noWatcher     = false
-	noRemote      = false
-	hostname      = ""
+	sourceDir        string
+	unrealsyncDir    string
+	localDiff        [MAX_DIFF_SIZE]byte
+	localDiffPtr     int
+	fschanges        = make(chan string, 10000)
+	dirschan         = make(chan string, 10000)
+	rcvchan          = make(chan bool)
+	excludes         = map[string]bool{}
+	servers          = map[string]Settings{}
+	isServer         = false
+	isDebug          = false
+	noWatcher        = false
+	noRemote         = false
+	hostname         = ""
+	forceServersFlag = ""
 )
 
 func init() {
@@ -109,6 +111,7 @@ func init() {
 	flag.BoolVar(&noWatcher, "no-watcher", false, "Internal parameter used on remote side to disable local watcher")
 	flag.BoolVar(&noRemote, "no-remote", false, "Internal parameter used on remote side to disable external events")
 	flag.StringVar(&hostname, "hostname", "", "Internal parameter used on remote side")
+	flag.StringVar(&forceServersFlag, "servers", "", "Perform sync only for specified servers")
 }
 
 func (p UnrealStat) Serialize() (res string) {
@@ -300,6 +303,11 @@ func parseConfig() {
 
 	excludes[".unrealsync"] = true
 
+	forceServers := general["servers"]
+	if forceServersFlag != "" {
+		forceServers = forceServersFlag
+	}
+
 	delete(dict, GENERAL_SECTION)
 
 	for key, serverSettings := range dict {
@@ -320,50 +328,28 @@ func parseConfig() {
 				serverSettings[generalKey] = generalValue
 			}
 		}
-		putToServers(key, serverSettings)
-	}
-}
-
-// parse interval in server name recursively
-// e.x. host1-3 = host1, host2, host3
-func putToServers(key string, rawSettings map[string]string) {
-	var is_interval bool = false
-
-	// parsing {1..n}
-	re := regexp.MustCompile("(.*)\\{(\\d+)\\.\\.(\\d+)\\}(.*)")
-	matches := re.FindStringSubmatch(key)
-
-	if matches != nil {
-		start, _ := strconv.Atoi(matches[2])
-		end, _ := strconv.Atoi(matches[3])
-		if start <= end {
-			for i := start; i <= end; i++ {
-				putToServers(matches[1]+strconv.Itoa(i)+matches[4], rawSettings)
-			}
-			is_interval = true
-		} else {
-			progressLn("Incorrect interval in server name: ", key)
+		var keys []string
+		keys, err = glob.Expand(key)
+		if err != nil {
+			fatalLn(fmt.Sprintf(
+				"Server name pattern '%s' parse error [config]: %s", key, err,
+			))
 		}
-	}
-
-	if !is_interval {
-		// parsing {1,3,12,n}
-		re := regexp.MustCompile("(.*)\\{([\\d\\,]+)\\}(.*)")
-		matches := re.FindStringSubmatch(key)
-		if matches != nil {
-			list := strings.Split(matches[2], ",")
-			if len(list) > 0 {
-				for _, i := range list {
-					putToServers(matches[1]+i+matches[3], rawSettings)
+		for _, k := range keys {
+			if forceServers != "" {
+				var res bool
+				res, err = glob.Glob(forceServers, k)
+				if err != nil {
+					fatalLn(fmt.Sprintf(
+						"Server name pattern '%s' parse error [override]: %s", key, err,
+					))
 				}
-				is_interval = true
+				if !res {
+					continue
+				}
 			}
+			servers[k] = parseServerSettings(k, serverSettings)
 		}
-	}
-
-	if !is_interval {
-		// settings are parsed for each key to pass correct hostname
-		servers[key] = parseServerSettings(key, rawSettings)
 	}
 }
 
